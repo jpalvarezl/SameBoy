@@ -198,6 +198,8 @@ endif
 # These must come before the -Wno- flags
 WARNINGS += -Werror -Wall -Wno-unknown-warning -Wno-unknown-warning-option -Wno-missing-braces
 WARNINGS += -Wno-nonnull -Wno-unused-result -Wno-multichar -Wno-int-in-bool-context -Wno-format-truncation -Wno-nullability-completeness
+# Silence a warning triggered by bundled HexFiend on very recent clang (Xcode 26 / clang 21)
+WARNINGS += -Wno-implicit-const-int-float-conversion
 
 # Only add this flag if the compiler supports it
 ifeq ($(shell $(CC) -x c -c $(NULL) -o $(NULL) -Werror -Wpartial-availability 2> $(NULL); echo $$?),0)
