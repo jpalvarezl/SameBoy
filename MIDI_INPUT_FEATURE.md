@@ -24,6 +24,32 @@ source picker.
 
 ---
 
+## 1.5 Building & running SameBoy on macOS (do this first)
+
+You need **full Xcode** installed (not just Command Line Tools) because the Cocoa app
+compiles `.xib` UI files with `ibtool`. You also need `rgbds` (boot-ROM assembler),
+installable with `brew install rgbds`.
+
+Build + launch in one line (works even if `xcode-select` points at Command Line Tools —
+no `sudo` needed):
+
+```bash
+cd ~/code/forks/SameBoy
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer make -j$(sysctl -n hw.ncpu) && open build/bin/SameBoy.app
+```
+
+- First build ~2 min (also assembles the Game Boy boot ROMs). Incremental rebuilds after a
+  code change take **seconds** — `make` only recompiles what changed.
+- Clean rebuild: `make clean`.
+- The app bundle lands at `build/bin/SameBoy.app`.
+
+**Toolchain note (Xcode 26 / clang 21):** a very new compiler promotes a harmless warning in
+the bundled HexFiend library to an error (because SameBoy builds with `-Werror`). This branch
+adds `-Wno-implicit-const-int-float-conversion` to the Makefile `WARNINGS` to work around it.
+On older compilers the flag is ignored, so it's safe.
+
+---
+
 ## 2. Background you need before touching code
 
 ### 2.1 Game Boy Link Cable / serial hardware
