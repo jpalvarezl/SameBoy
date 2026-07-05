@@ -11,7 +11,10 @@ typedef struct {
     bool bit_to_send;
     // a tiny ring buffer of MIDI bytes queued from the host:
     uint8_t queue[256];
-    uint8_t queue_head, queue_tail;
+    // consumer read cursor: index of the next byte to READ. GB_midi_run advances it.
+    uint8_t queue_head;
+    // producer write cursor: index of the next slot to WRITE. GB_midi_input_byte advances it.
+    uint8_t queue_tail;
 } GB_midi_t;
 
 void GB_connect_midi(GB_gameboy_t *gb);

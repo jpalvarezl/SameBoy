@@ -22,5 +22,16 @@ bool GB_midi_is_enabled(GB_gameboy_t *gb) {
 }
 
 void GB_midi_input_byte(GB_gameboy_t *gb, uint8_t byte) {
-    
+    if (gb->accessory != GB_ACCESSORY_MIDI) {
+        GB_log(gb, "GB_midi_input_byte called when MIDI is not enabled.\n");
+        return;
+    }
+    uint8_t next = gb->midi.queue_tail + 1;
+    if (next == gb->midi.queue_head) {
+        /* Queue full: drop the byte silently. This only happens if the Game Boy has stopped
+           draining the serial port, and per-byte logging here could flood a realtime path. */
+        return;
+    }
+    gb->midi.queue[gb->midi.queue_tail] = byte;
+    gb->midi.queue_tail = next;
 }
