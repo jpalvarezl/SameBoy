@@ -221,6 +221,10 @@ thread. Push bytes through a lock‑free/atomic ring buffer (or SameBoy's existi
       armed external‑clock slave and the queue is non‑empty, we clock one byte in bit‑by‑bit
       via `GB_serial_set_data_bit`, pacing it so mGB's ISR can re‑arm `SC` between bytes.
 - [ ] Test with the mGB ROM: play notes from a DAW / MIDI keyboard, hear sound.
+- [ ] **Tests:** add an automated test in the project's style (see Phase 5 / §6). SameBoy
+      has *no* unit tests and *no* existing tests for serial devices (Printer/Workboy have
+      none), so "matching other serial devices" means following the ROM‑based hash model
+      and, since the tester can't inject serial input today, extending it to do so.
 
 ### Phase 2 — macOS UI + CoreMIDI
 - [ ] Add a "MIDI Input" item to the Connect submenu in `MainMenu.xib` with a dynamic
@@ -237,10 +241,41 @@ thread. Push bytes through a lock‑free/atomic ring buffer (or SameBoy's existi
 ### Phase 4 — Other frontends (optional)
 - [ ] SDL frontend MIDI input (RtMidi / platform APIs) mirroring the Cocoa accessory.
 
+### Phase 5 — Automated tests (match the project's conventions)
+> ⚠️ Reality check: SameBoy has **no C unit‑test framework** and **no tests at all** for the
+> existing serial peripherals (Printer, Workboy). Its testing is entirely **ROM‑based image
+> hashing** (`Tester/main.c` → `sameboy_tester`, pinned SHA‑1s in
+> `.github/actions/sanity_tests.sh`). `CONTRIBUTING.md` forbids new languages, so any test
+> must stay in C11 and fit that model. So there isn't a serial‑device test to "copy" — we're
+> setting the precedent. Keep it deterministic and minimal.
+- [ ] Decide the deterministic signal to assert on: e.g. feed a fixed MIDI sequence to mGB
+      and capture the resulting framebuffer (a visualiser) or an APU/register snapshot.
+- [ ] The current `sameboy_tester` can't inject serial/MIDI input. Add a minimal hook (e.g. a
+      `--midi <file-of-bytes>` option, or a small dedicated `GB_INTERNAL` harness like
+      `Tester/main.c`) that calls `GB_midi_input_byte` on a schedule while the ROM runs.
+- [ ] Produce a reference output, pin its SHA‑1, and wire it into `sanity_tests.sh` exactly
+      like the acid2 / sound ROMs (`--length N test.gb`, then hash‑compare the `.bmp`).
+- [ ] Keep the test ROM small and checked in (or document how to regenerate it); reference
+      ROMs live under `.github/actions/`.
+- [ ] Bonus: a pure‑core C test that connects the MIDI device, pushes known bytes, single‑
+      steps the serial clock, and asserts the bytes reach `SB` — no ROM needed, closest thing
+      to a "unit test" the codebase allows.
+
 ---
 
-## 6. Testing tips
+## 6. Testing
 
+### How SameBoy tests things (so our tests fit in)
+- `Tester/main.c` builds **`sameboy_tester`** (`make tester`), a headless harness that runs a
+  `.gb`/`.gbc` **test ROM** for N frames and dumps the final framebuffer to a BMP/TGA.
+- `.github/actions/sanity_tests.sh` runs known test ROMs (acid2, sound, oam_bug) through it
+  and compares the **SHA‑1 of the output image** against pinned hashes. That *is* the CI test
+  suite (`.github/workflows/sanity.yml`).
+- There is **no unit‑test framework** and **no serial‑device tests** to copy. `CONTRIBUTING.md`
+  bans new languages, so tests stay C11 + ROM‑hash. See Phase 5 for how we add MIDI tests
+  within these constraints.
+
+### Manual testing tips
 - **mGB first** — it's raw passthrough, so a wiring bug is obvious (silence vs. notes).
 - Use a virtual MIDI source (macOS **IAC Driver** in *Audio MIDI Setup*) so you can drive it
   from any DAW without hardware.
