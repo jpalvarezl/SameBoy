@@ -30,6 +30,7 @@ extern "C" {
 #include "joypad.h"
 #include "mbc.h"
 #include "memory.h"
+#include "midi.h"
 #include "printer.h"
 #include "timing.h"
 #include "rewind.h"
@@ -331,6 +332,7 @@ typedef GB_ENUM(uint8_t, {
     GB_ACCESSORY_NONE,
     GB_ACCESSORY_PRINTER,
     GB_ACCESSORY_WORKBOY,
+    GB_ACCESSORY_MIDI,
 }) GB_accessory_t;
 
 /* When state saving, each section is dumped independently of other sections.
@@ -647,6 +649,7 @@ struct GB_gameboy_internal_s {
         union {
             GB_printer_t printer;
             GB_workboy_t workboy;
+            GB_midi_t midi;
         };
     )
 

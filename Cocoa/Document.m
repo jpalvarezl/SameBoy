@@ -1455,6 +1455,9 @@ static bool is_path_writeable(const char *path)
     else if ([anItem action] == @selector(connectWorkboy:)) {
         [(NSMenuItem *)anItem setState:GB_get_built_in_accessory(&_gb) == GB_ACCESSORY_WORKBOY];
     }
+    else if ([anItem action] == @selector(connectMIDI:)) {
+        [(NSMenuItem *)anItem setState:GB_get_built_in_accessory(&_gb) == GB_ACCESSORY_MIDI];
+    }
     else if ([anItem action] == @selector(connectLinkCable:)) {
         [(NSMenuItem *)anItem setState:[(NSMenuItem *)anItem representedObject] == _master ||
                                        [(NSMenuItem *)anItem representedObject] == _slave];
@@ -2537,6 +2540,14 @@ enum GBWindowResizeAction
     [self disconnectLinkCable];
     [self performAtomicBlock:^{
         GB_connect_workboy(&_gb, setWorkboyTime, getWorkboyTime);
+    }];
+}
+
+- (IBAction)connectMIDI:(id)sender
+{
+    [self disconnectLinkCable];
+    [self performAtomicBlock:^{
+        GB_connect_midi(&_gb);
     }];
 }
 
