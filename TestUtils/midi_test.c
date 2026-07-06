@@ -144,6 +144,83 @@ static void test_wraparound(void)
 // ===========================================================================
 // TODO(you): add the behavioral tests here, then register them with RUN() below.
 // A helper like deliver_one_byte(gb) -- arm SC, clear IF, call GB_midi_run 8x -- will help.
+static void deliver_one_byte(GB_gameboy_t *gb)
+{
+    gb->io_registers[GB_IO_SC] = 0x80;              // arm: start=1, external clock=0
+    gb->io_registers[GB_IO_IF] = 0;                 // clear so we can see the serial IRQ fire
+    for (int i = 0; i < 8; i++) GB_midi_run(gb);    // 8 ticks = 8 bits
+}
+
+static void test_byte_arrives_intact(void)
+{
+    GB_gameboy_t gb; 
+    setup(&gb);
+    GB_midi_input_byte(&gb, 0x90);
+
+    deliver_one_byte(&gb);
+    CHECK(gb.io_registers[GB_IO_SB] == 0x90); // full value transfered
+    CHECK((gb.io_registers[GB_IO_SC] & 0x80) == 0); // disarmed; transfer done
+    CHECK((gb.io_registers[GB_IO_IF] & 0x08) != 0); // IRQ raised
+
+    GB_free(&gb);
+}
+
+// Pacing (the important one): an un-armed slave must never be overrun. We deliver one byte
+// so SB holds a known value, then queue another but leave SC un-armed -- the heartbeat must
+// clock nothing while the slave isn't ready, and the byte must stay safely queued. This is
+// the property that makes clocking a slave safe: SC bit7 IS the back-pressure signal.
+static void test_pacing_no_overrun(void)
+{
+    GB_gameboy_t gb;
+    setup(&gb);
+
+    // Baseline: first byte arrives normally, so SB holds a known 0x90.
+    GB_midi_input_byte(&gb, 0x90);
+    deliver_one_byte(&gb);
+    CHECK(gb.io_registers[GB_IO_SB] == 0x90);
+
+    // Queue a second byte, but mGB has NOT re-armed (SC bit7 clear). Pump the heartbeat hard:
+    // not a single bit may be clocked while the slave is un-armed.
+    GB_midi_input_byte(&gb, 0x3C);
+    gb.io_registers[GB_IO_SC] = 0x00;               // un-armed
+    for (int i = 0; i < 20; i++) GB_midi_run(&gb);
+
+    CHECK(gb.io_registers[GB_IO_SB] == 0x90);       // unchanged: nothing was clocked
+    CHECK(queued_count(&gb) == 1);                  // the byte is still waiting, not lost
+
+    GB_free(&gb);
+}
+
+static void test_sequential_delivery(void)
+{
+    GB_gameboy_t gb; 
+    setup(&gb);
+    GB_midi_input_byte(&gb, 0x3C);
+    GB_midi_input_byte(&gb, 0x7F);
+
+    deliver_one_byte(&gb);
+    CHECK(gb.io_registers[GB_IO_SB] == 0x3C); // full value transfered
+    deliver_one_byte(&gb);
+    CHECK(gb.io_registers[GB_IO_SB] == 0x7F); // full value transfered
+    CHECK((gb.io_registers[GB_IO_SC] & 0x80) == 0); // disarmed; transfer done
+    CHECK((gb.io_registers[GB_IO_IF] & 0x08) != 0); // IRQ raised
+
+    GB_free(&gb);
+}
+
+static void test_empty_queue_is_safe(void)
+{
+    GB_gameboy_t gb; 
+    setup(&gb);
+    uint8_t initial_sb_value = gb.io_registers[GB_IO_SB];
+
+    deliver_one_byte(&gb);   // arms SC, but the queue is empty -> nothing should be clocked
+    CHECK(gb.io_registers[GB_IO_SB] == initial_sb_value); // SB untouched
+    CHECK((gb.io_registers[GB_IO_SC] & 0x80) != 0);       // STILL armed: no byte completed
+    CHECK((gb.io_registers[GB_IO_IF] & 0x08) == 0);       // no serial interrupt raised
+
+    GB_free(&gb);
+}
 
 int main(void)
 {
@@ -152,7 +229,10 @@ int main(void)
     RUN(test_guard_when_disconnected);
     RUN(test_full_buffer_drops);
     RUN(test_wraparound);
-    // Task 2: RUN(test_byte_arrives_intact); RUN(test_pacing_no_overrun); ...
+    RUN(test_byte_arrives_intact);
+    RUN(test_pacing_no_overrun);
+    RUN(test_sequential_delivery);
+    RUN(test_empty_queue_is_safe);
 
     if (g_failures == 0) {
         printf("ALL MIDI TESTS PASSED\n");
