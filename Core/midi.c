@@ -35,3 +35,44 @@ void GB_midi_input_byte(GB_gameboy_t *gb, uint8_t byte) {
     gb->midi.queue[gb->midi.queue_tail] = byte;
     gb->midi.queue_tail = next;
 }
+
+void GB_midi_run(GB_gameboy_t *gb) {
+    if (gb->accessory != GB_ACCESSORY_MIDI) {
+        return;
+    }
+    // Looking at bit7 and bit0. We are looking for the serial port to be armed and expecting external clock
+    // Therefore we are looking for 0b10000001 to be 0b10000000
+    //  ┌───────────┬───────────────┬──────────────┬──────────────────────────────────────────────────────┬──────────┐
+    //  │ SC & 0x81 │ bit7 (armed?) │ bit0 (clock) │ meaning                                              │ feed it? │
+    //  ├───────────┼───────────────┼──────────────┼──────────────────────────────────────────────────────┼──────────┤
+    //  │ 0x00      │ no            │ external     │ idle                                                 │ no       │
+    //  ├───────────┼───────────────┼──────────────┼──────────────────────────────────────────────────────┼──────────┤
+    //  │ 0x01      │ no            │ internal     │ idle                                                 │ no       │
+    //  ├───────────┼───────────────┼──────────────┼──────────────────────────────────────────────────────┼──────────┤
+    //  │ 0x80      │ yes           │ external     │ armed slave — mGB waiting for us                     │ YES      │
+    //  ├───────────┼───────────────┼──────────────┼──────────────────────────────────────────────────────┼──────────┤
+    //  │ 0x81      │ yes           │ internal     │ armed master (GB drives clock; Printer/Workboy case) │ no       │
+    //  └───────────┴───────────────┴──────────────┴──────────────────────────────────────────────────────┴──────────┘
+    if ((gb->io_registers[GB_IO_SC] & 0x81) != 0x80) {
+        return;
+    }
+
+    // idle
+    if (gb->midi.bits_left == 0) {
+        // if the buffer is empty, there is nothing do do
+        if (gb->midi.queue_head == gb->midi.queue_tail) {
+            return;
+        }
+
+        // Otherwise, we prepare the next byte
+        gb->midi.byte_being_sent = gb->midi.queue[gb->midi.queue_head];
+        gb->midi.queue_head = gb->midi.queue_head + 1;
+        gb->midi.bits_left = 8;
+    }
+
+    // send most significant bit
+    GB_serial_set_data_bit(gb, gb->midi.byte_being_sent >> 7);
+    // move the next bit to the MSB position and substract one from the bits left to send
+    gb->midi.byte_being_sent <<= 1;
+    gb->midi.bits_left--;
+}
