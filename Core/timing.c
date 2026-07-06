@@ -227,6 +227,8 @@ void GB_serial_master_edge(GB_gameboy_t *gb)
             }
         }
         
+    } else if (!gb->serial_master_clock && gb->accessory == GB_ACCESSORY_MIDI) {
+        GB_midi_run(gb);
     }
 }
 
