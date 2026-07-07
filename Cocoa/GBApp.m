@@ -313,6 +313,12 @@ static uint32_t color_to_int(NSColor *color)
 
 - (void)menuNeedsUpdate:(NSMenu *)menu
 {
+    if (menu == self.midiInputMenuItem.submenu) {
+        // The MIDI submenu belongs to the current Game Boy; let it build its own list.
+        [(Document *)[[NSDocumentController sharedDocumentController] currentDocument] populateMIDIMenu:menu];
+        return;
+    }
+
     NSMutableArray *items = [NSMutableArray array];
     NSDocument *currentDocument = [[NSDocumentController sharedDocumentController] currentDocument];
     

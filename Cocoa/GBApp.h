@@ -14,6 +14,7 @@
 - (IBAction)toggleDeveloperMode:(id)sender;
 - (IBAction)switchPreferencesTab:(id)sender;
 @property (nonatomic, weak) IBOutlet NSMenuItem *linkCableMenuItem;
+@property (nonatomic, weak) IBOutlet NSMenuItem *midiInputMenuItem;
 @property (nonatomic, strong) IBOutlet NSWindow *updateWindow;
 @property (nonatomic, strong) IBOutlet WebView *updateChanges;
 @property (nonatomic, strong) IBOutlet NSProgressIndicator *updatesSpinner;

@@ -91,6 +91,7 @@ enum model {
 + (NSImage *) imageFromData:(NSData *)data width:(NSUInteger) width height:(NSUInteger) height scale:(double) scale;
 - (void) performAtomicBlock: (void (^)())block;
 - (void) connectLinkCable:(NSMenuItem *)sender;
+- (void)populateMIDIMenu:(NSMenu *)menu;
 - (int)loadStateFile:(const char *)path noErrorOnNotFound:(bool)noErrorOnFileNotFound;
 - (NSString *)captureOutputForBlock: (void (^)())block;
 - (NSFont *)debuggerFontOfSize:(unsigned)size;

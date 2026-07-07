@@ -1475,8 +1475,16 @@ static bool is_path_writeable(const char *path)
     else if ([anItem action] == @selector(connectWorkboy:)) {
         [(NSMenuItem *)anItem setState:GB_get_built_in_accessory(&_gb) == GB_ACCESSORY_WORKBOY];
     }
-    else if ([anItem action] == @selector(connectMIDI:)) {
-        [(NSMenuItem *)anItem setState:GB_get_built_in_accessory(&_gb) == GB_ACCESSORY_MIDI];
+    else if ([anItem action] == @selector(selectMIDISource:)) {
+        bool isMIDI = GB_get_built_in_accessory(&_gb) == GB_ACCESSORY_MIDI;
+        NSString *itemSource = [(NSMenuItem *)anItem representedObject];
+        NSString *selected = [[NSUserDefaults standardUserDefaults] stringForKey:@"GBMIDIInputSource"];
+        if (itemSource == nil) {
+            [(NSMenuItem *)anItem setState:!isMIDI];   // the "None" row
+        }
+        else {
+            [(NSMenuItem *)anItem setState:(isMIDI && [itemSource isEqualToString:selected])];
+        }
     }
     else if ([anItem action] == @selector(connectLinkCable:)) {
         [(NSMenuItem *)anItem setState:[(NSMenuItem *)anItem representedObject] == _master ||
@@ -2566,20 +2574,70 @@ enum GBWindowResizeAction
     }];
 }
 
-- (IBAction)connectMIDI:(id)sender
+- (IBAction)selectMIDISource:(NSMenuItem *)sender
 {
-    [self disconnectLinkCable];
-    [self performAtomicBlock:^{
-        GB_connect_midi(&_gb);
-    }];
-    [self setupMIDIInput];
+    NSString *name = sender.representedObject; // nil == the "None" row
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    if (name) {
+        [defaults setObject:name forKey:@"GBMIDIInputSource"];
+        [self disconnectLinkCable];
+        [self performAtomicBlock:^{
+            GB_connect_midi(&_gb);
+        }];
+        [self setupMIDIInput];
+    }
+    else {
+        [defaults removeObjectForKey:@"GBMIDIInputSource"];
+        [self teardownMIDIInput];
+        [self performAtomicBlock:^{
+            GB_disconnect_serial(&_gb);
+        }];
+    }
 }
 
-/* Open a CoreMIDI client + input port and connect every available source to it.
-   Called when the MIDI accessory is attached; torn down whenever we leave it. */
+/* Build the MIDI submenu: "None" plus every available input source. A MIDI *output*
+   section (destinations) will be appended below the input list in Phase 3. */
+- (void)populateMIDIMenu:(NSMenu *)menu
+{
+    [menu removeAllItems];
+
+    NSMenuItem *none = [[NSMenuItem alloc] initWithTitle:@"None"
+                                                  action:@selector(selectMIDISource:) keyEquivalent:@""];
+    [menu addItem:none];
+
+    ItemCount count = MIDIGetNumberOfSources();
+    if (count) {
+        [menu addItem:[NSMenuItem separatorItem]];
+    }
+    for (ItemCount i = 0; i < count; i++) {
+        NSString *name = [self nameOfMIDIEndpoint:MIDIGetSource(i)];
+        if (!name) continue;
+        NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:name
+                                                      action:@selector(selectMIDISource:) keyEquivalent:@""];
+        item.representedObject = name; // the choice we persist and match against
+        [menu addItem:item];
+    }
+}
+
+// The stable, human-readable name of a CoreMIDI endpoint (used for display and persistence).
+- (NSString *)nameOfMIDIEndpoint:(MIDIEndpointRef)endpoint
+{
+    if (!endpoint) return nil;
+    CFStringRef name = NULL;
+    if (MIDIObjectGetStringProperty(endpoint, kMIDIPropertyDisplayName, &name) != noErr) {
+        return nil;
+    }
+    return (__bridge_transfer NSString *)name; // we own the +1 reference; hand it to ARC
+}
+
+/* Open a CoreMIDI client + input port and connect the source the user chose (matched by
+   name). Called when a source is selected; torn down whenever we leave MIDI. */
 - (void)setupMIDIInput
 {
     [self teardownMIDIInput]; // idempotent: always start from a clean slate
+
+    NSString *wanted = [[NSUserDefaults standardUserDefaults] stringForKey:@"GBMIDIInputSource"];
+    if (!wanted) return; // no source chosen -> nothing to open
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations" // legacy CoreMIDI API for the 10.9 floor
@@ -2598,11 +2656,12 @@ enum GBWindowResizeAction
         return;
     }
 
-    // Milestone A: connect *every* source so any MIDI reaches us (the picker comes later).
-    ItemCount sources = MIDIGetNumberOfSources();
-    for (ItemCount i = 0; i < sources; i++) {
+    // Connect only the chosen source. Endpoint refs aren't stable across launches, so we
+    // match by name -- if the device isn't present, the port simply stays unconnected.
+    ItemCount count = MIDIGetNumberOfSources();
+    for (ItemCount i = 0; i < count; i++) {
         MIDIEndpointRef source = MIDIGetSource(i);
-        if (source) {
+        if ([wanted isEqualToString:[self nameOfMIDIEndpoint:source]]) {
             MIDIPortConnectSource(_midiInputPort, source, NULL);
         }
     }
