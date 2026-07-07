@@ -1,6 +1,7 @@
 #import <AVFoundation/AVFoundation.h>
 #import <CoreAudio/CoreAudio.h>
 #import <Core/gb.h>
+#import <CoreMIDI/CoreMIDI.h>
 #import "GBAudioClient.h"
 #import "Document.h"
 #import "GBApp.h"
@@ -125,6 +126,10 @@
     GBCheatSearchController *_cheatSearchController;
     
     bool _romModified;
+    
+    /* MIDI input (CoreMIDI). Per-Document: this is our end of the emulated serial cable. */
+    MIDIClientRef _midiClient;
+    MIDIPortRef _midiInputPort;
 }
 
 static void boot_rom_load(GB_gameboy_t *gb, GB_boot_rom_t type)
@@ -137,6 +142,19 @@ static void vblank(GB_gameboy_t *gb, GB_vblank_type_t type)
 {
     Document *self = (__bridge Document *)GB_get_user_data(gb);
     [self vblankWithType:type];
+}
+
+static void midiRead(const MIDIPacketList *packets, void *readProcRefCon, void *srcConnRefCon)
+{
+    Document *self = (__bridge Document *)readProcRefCon; // same idiom as vblank(), but the pointer comes from CoreMIDI's refCon
+    const MIDIPacket *packet = &packets->packet[0];
+    for (unsigned i = 0; i < packets->numPackets; i++) {
+        for (unsigned j = 0; j < packet->length; j++) {
+            uint8_t byte = packet->data[j]; // already raw MIDI 1.0 -- straight into the queue
+            GB_midi_input_byte(&self->_gb, byte); // lock-free: producer side of the SPSC ring buffer
+        }
+        packet = MIDIPacketNext(packet); // packets are variable-length: never index packet[i]
+    }
 }
 
 static void consoleLog(GB_gameboy_t *gb, const char *string, GB_log_attributes_t attributes)
@@ -805,6 +823,7 @@ static unsigned *multiplication_table_for_frequency(unsigned frequency)
 - (void)dealloc
 {
     [_cameraSession stopRunning];
+    [self teardownMIDIInput]; // stop the MIDI callback before freeing the _gb it feeds
     self.view.gb = NULL;
     GB_free(&_gb);
     if (_cameraImage) {
@@ -1368,6 +1387,7 @@ static bool is_path_writeable(const char *path)
 - (void)close
 {
     [self disconnectLinkCable];
+    [self teardownMIDIInput];
     if (!self.gbsPlayerView) {
         [[NSUserDefaults standardUserDefaults] setInteger:self.mainWindow.frame.size.width forKey:@"LastWindowWidth"];
         [[NSUserDefaults standardUserDefaults] setInteger:self.mainWindow.frame.size.height forKey:@"LastWindowHeight"];
@@ -2522,6 +2542,7 @@ enum GBWindowResizeAction
 - (IBAction)disconnectAllAccessories:(id)sender
 {
     [self disconnectLinkCable];
+    [self teardownMIDIInput];
     [self performAtomicBlock:^{
         GB_disconnect_serial(&_gb);
     }];
@@ -2530,6 +2551,7 @@ enum GBWindowResizeAction
 - (IBAction)connectPrinter:(id)sender
 {
     [self disconnectLinkCable];
+    [self teardownMIDIInput];
     [self performAtomicBlock:^{
         GB_connect_printer(&_gb, printImage, printDone);
     }];
@@ -2538,6 +2560,7 @@ enum GBWindowResizeAction
 - (IBAction)connectWorkboy:(id)sender
 {
     [self disconnectLinkCable];
+    [self teardownMIDIInput];
     [self performAtomicBlock:^{
         GB_connect_workboy(&_gb, setWorkboyTime, getWorkboyTime);
     }];
@@ -2549,6 +2572,52 @@ enum GBWindowResizeAction
     [self performAtomicBlock:^{
         GB_connect_midi(&_gb);
     }];
+    [self setupMIDIInput];
+}
+
+/* Open a CoreMIDI client + input port and connect every available source to it.
+   Called when the MIDI accessory is attached; torn down whenever we leave it. */
+- (void)setupMIDIInput
+{
+    [self teardownMIDIInput]; // idempotent: always start from a clean slate
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations" // legacy CoreMIDI API for the 10.9 floor
+    OSStatus status = MIDIClientCreate(CFSTR("SameBoy"), NULL, NULL, &_midiClient);
+    if (status != noErr) {
+        NSLog(@"SameBoy: MIDIClientCreate failed (%d)", (int)status);
+        return;
+    }
+
+    status = MIDIInputPortCreate(_midiClient, CFSTR("SameBoy Input"), midiRead,
+                                 (__bridge void *)self, &_midiInputPort);
+#pragma clang diagnostic pop
+    if (status != noErr) {
+        NSLog(@"SameBoy: MIDIInputPortCreate failed (%d)", (int)status);
+        [self teardownMIDIInput];
+        return;
+    }
+
+    // Milestone A: connect *every* source so any MIDI reaches us (the picker comes later).
+    ItemCount sources = MIDIGetNumberOfSources();
+    for (ItemCount i = 0; i < sources; i++) {
+        MIDIEndpointRef source = MIDIGetSource(i);
+        if (source) {
+            MIDIPortConnectSource(_midiInputPort, source, NULL);
+        }
+    }
+}
+
+- (void)teardownMIDIInput
+{
+    if (_midiInputPort) {
+        MIDIPortDispose(_midiInputPort); // also disconnects its sources
+        _midiInputPort = 0;
+    }
+    if (_midiClient) {
+        MIDIClientDispose(_midiClient);
+        _midiClient = 0;
+    }
 }
 
 - (void)setFileURL:(NSURL *)fileURL

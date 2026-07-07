@@ -604,7 +604,7 @@ $(BIN)/SameBoy.app/Contents/MacOS/SameBoy: $(BIN)/SameBoy.app/Contents/Library/Q
 	
 $(BIN)/SameBoy.app/Contents/Library/QuickLook/SameBoy.qlgenerator/Contents/MacOS/SameBoy.dylib: $(COCOA_OBJECTS) $(CORE_OBJECTS) $(QUICKLOOK_OBJECTS)
 	-@$(MKDIR) -p $(dir $@)
-	$(CC) $^ -o $@ $(LDFLAGS) $(FAT_FLAGS) -shared -install_name @rpath/Contents/MacOS/SameBoy.dylib -framework OpenGL -framework AudioUnit -framework AVFoundation -framework CoreVideo -framework CoreMedia -framework IOKit -framework PreferencePanes -framework Carbon -framework QuartzCore -framework Security -framework WebKit -weak_framework Metal -weak_framework MetalKit -weak_framework QuickLookThumbnailing -weak_framework QuickLookUI -framework Quicklook -framework AppKit -Wl,-exported_symbols_list,QuickLook/exports.sym -Wl,-exported_symbol,_main
+	$(CC) $^ -o $@ $(LDFLAGS) $(FAT_FLAGS) -shared -install_name @rpath/Contents/MacOS/SameBoy.dylib -framework OpenGL -framework AudioUnit -framework CoreMIDI -framework AVFoundation -framework CoreVideo -framework CoreMedia -framework IOKit -framework PreferencePanes -framework Carbon -framework QuartzCore -framework Security -framework WebKit -weak_framework Metal -weak_framework MetalKit -weak_framework QuickLookThumbnailing -weak_framework QuickLookUI -framework Quicklook -framework AppKit -Wl,-exported_symbols_list,QuickLook/exports.sym -Wl,-exported_symbol,_main
 ifeq ($(CONF), release)
 	$(STRIP) $@
 	$(CODESIGN) $@
