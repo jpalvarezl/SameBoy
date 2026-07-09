@@ -17,7 +17,6 @@
 
 #include <Core/gb.h>
 #include <stdio.h>
-#include <string.h>
 
 // ---------------------------------------------------------------------------
 // Tiny zero-dependency test harness.
@@ -43,7 +42,7 @@ static const char *g_test = "";
 static void setup(GB_gameboy_t *gb)
 {
     GB_init(gb, GB_MODEL_DMG_B);
-    GB_connect_midi(gb);
+    GB_connect_midi(gb, NULL);   // input tests don't need the MIDI-out callback
 }
 
 // Bytes currently queued. Unsigned 8-bit subtraction wraps mod 256, so this is correct
@@ -229,40 +228,29 @@ static void test_empty_queue_is_safe(void)
 // Here the GB is the MASTER: normally the core's serial machinery calls serial_start
 // once per outgoing bit. We stand in for that by invoking the *registered* callback
 // pointer directly with a known bit pattern (MSB-first, exactly how the hardware shifts),
-// then check that serial_start reassembles the original byte.
-//
-// serial_start currently reports each completed byte via GB_log("MIDI out: %02X"), so we
-// route the log into a buffer and read it back. When the Task O2 output callback lands,
-// swap capture_log for that callback -- the assertions stay the same.
+// then check that serial_start reassembles the original byte and hands it to the
+// output-byte callback we registered via GB_connect_midi.
 // ===========================================================================
 
-static char   g_log[4096];
-static size_t g_log_len;
+// serial_start delivers each completed out-byte through this callback; capture them so
+// tests can assert on the exact bytes and their order.
+static uint8_t g_out_bytes[256];
+static size_t  g_out_count;
 
-static void reset_log(void)
+static void capture_out_byte(GB_gameboy_t *gb, uint8_t byte)
 {
-    g_log_len = 0;
-    g_log[0] = '\0';
-}
-
-// GB_log sink: append every logged string so tests can grep it.
-static void capture_log(GB_gameboy_t *gb, const char *string, GB_log_attributes_t attributes)
-{
-    (void)gb; (void)attributes;
-    size_t n = strlen(string);
-    if (g_log_len + n < sizeof(g_log)) {
-        memcpy(g_log + g_log_len, string, n);
-        g_log_len += n;
-        g_log[g_log_len] = '\0';
+    (void)gb;
+    if (g_out_count < sizeof(g_out_bytes)) {
+        g_out_bytes[g_out_count++] = byte;
     }
 }
 
-// setup() plus a log sink, so completed out-bytes are readable via g_log.
-static void setup_capturing(GB_gameboy_t *gb)
+// setup() but with a capturing output callback, so completed out-bytes land in g_out_bytes.
+static void setup_out(GB_gameboy_t *gb)
 {
-    setup(gb);
-    GB_set_log_callback(gb, capture_log);
-    reset_log();
+    GB_init(gb, GB_MODEL_DMG_B);
+    GB_connect_midi(gb, capture_out_byte);
+    g_out_count = 0;
 }
 
 // Clock one byte OUT of the GB, MSB-first, through the registered start callback.
@@ -277,9 +265,10 @@ static void clock_out_byte(GB_gameboy_t *gb, uint8_t byte)
 static void test_out_byte_assembled_msb_first(void)
 {
     GB_gameboy_t gb;
-    setup_capturing(&gb);
+    setup_out(&gb);
     clock_out_byte(&gb, 0x90);
-    CHECK(strstr(g_log, "MIDI out: 90") != NULL);
+    CHECK(g_out_count == 1);
+    CHECK(g_out_bytes[0] == 0x90);
     GB_free(&gb);
 }
 
@@ -287,26 +276,27 @@ static void test_out_byte_assembled_msb_first(void)
 static void test_out_partial_byte_not_emitted(void)
 {
     GB_gameboy_t gb;
-    setup_capturing(&gb);
+    setup_out(&gb);
     for (int i = 7; i >= 1; i--) {
         gb.serial_transfer_bit_start_callback(&gb, (0x90 >> i) & 1);  // only 7 bits
     }
     CHECK(gb.midi.bits_received == 7);            // mid-byte
-    CHECK(strstr(g_log, "MIDI out") == NULL);     // nothing completed yet
+    CHECK(g_out_count == 0);                      // nothing completed yet
     GB_free(&gb);
 }
 
-// Consecutive bytes: the accumulator resets between them and each value is exact.
+// Consecutive bytes: the accumulator resets between them and each value is exact, in order.
 static void test_out_resets_between_bytes(void)
 {
     GB_gameboy_t gb;
-    setup_capturing(&gb);
+    setup_out(&gb);
     clock_out_byte(&gb, 0x3C);
     clock_out_byte(&gb, 0x7F);
     CHECK(gb.midi.bits_received == 0);            // clean slate after each byte
     CHECK(gb.midi.byte_being_received == 0);
-    CHECK(strstr(g_log, "MIDI out: 3C") != NULL);
-    CHECK(strstr(g_log, "MIDI out: 7F") != NULL);
+    CHECK(g_out_count == 2);
+    CHECK(g_out_bytes[0] == 0x3C);
+    CHECK(g_out_bytes[1] == 0x7F);
     GB_free(&gb);
 }
 

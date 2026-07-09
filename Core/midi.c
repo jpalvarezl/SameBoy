@@ -7,7 +7,9 @@ static void serial_start(GB_gameboy_t *gb, bool bit_received) {
     gb->midi.bits_received++;
 
     if (gb->midi.bits_received == 8) {
-        GB_log(gb, "MIDI out: %02X\n", gb->midi.byte_being_received);
+        if (gb->midi_output_byte_callback) {
+            gb->midi_output_byte_callback(gb, gb->midi.byte_being_received);
+        }
         gb->midi.bits_received = 0;
         gb->midi.byte_being_received = 0;
     }
@@ -18,11 +20,12 @@ static bool serial_end(GB_gameboy_t *gb) {
     return true; 
 }
 
-void GB_connect_midi(GB_gameboy_t *gb) {
+void GB_connect_midi(GB_gameboy_t *gb, GB_midi_output_byte_callback_t cb) {
     GB_ASSERT_NOT_RUNNING_OTHER_THREAD(gb)
     memset(&gb->midi, 0, sizeof(gb->midi));
     GB_set_serial_transfer_bit_start_callback(gb, serial_start);
     GB_set_serial_transfer_bit_end_callback(gb, serial_end);
+    gb->midi_output_byte_callback = cb;
     gb->accessory = GB_ACCESSORY_MIDI;
 }
 

@@ -276,7 +276,6 @@ typedef void (*GB_infrared_callback_t)(GB_gameboy_t *gb, bool on);
 typedef void (*GB_rumble_callback_t)(GB_gameboy_t *gb, double rumble_amplitude);
 typedef void (*GB_serial_transfer_bit_start_callback_t)(GB_gameboy_t *gb, bool bit_to_send);
 typedef bool (*GB_serial_transfer_bit_end_callback_t)(GB_gameboy_t *gb);
-typedef void (*GB_midi_output_byte_callback_t)(GB_gameboy_t *gb, uint8_t byte);
 typedef void (*GB_joyp_write_callback_t)(GB_gameboy_t *gb, uint8_t value);
 typedef void (*GB_icd_pixel_callback_t)(GB_gameboy_t *gb, uint8_t row);
 typedef void (*GB_icd_hreset_callback_t)(GB_gameboy_t *gb);
@@ -733,6 +732,7 @@ struct GB_gameboy_internal_s {
         GB_read_memory_callback_t read_memory_callback;
         GB_write_memory_callback_t write_memory_callback;
         GB_boot_rom_load_callback_t boot_rom_load_callback;
+        GB_midi_output_byte_callback_t midi_output_byte_callback;
         GB_print_image_callback_t printer_callback;
         GB_printer_done_callback_t printer_done_callback;
         GB_workboy_set_time_callback_t workboy_set_time_callback;

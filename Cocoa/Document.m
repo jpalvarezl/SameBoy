@@ -2582,7 +2582,7 @@ enum GBWindowResizeAction
         [defaults setObject:name forKey:@"GBMIDIInputSource"];
         [self disconnectLinkCable];
         [self performAtomicBlock:^{
-            GB_connect_midi(&_gb);
+            GB_connect_midi(&_gb, NULL); // TODO(MIDI out): pass a real output callback when CoreMIDI-out lands
         }];
         [self setupMIDIInput];
     }

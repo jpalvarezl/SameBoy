@@ -4,6 +4,8 @@
 #include <stdbool.h>
 #include "defs.h"
 
+typedef void (*GB_midi_output_byte_callback_t)(GB_gameboy_t *gb, uint8_t byte);
+
 typedef struct {
     // --------- MIDI in (host → GB): queued bytes waiting to be clocked into the GB ---------
     // a tiny ring buffer of MIDI bytes queued from the host:
@@ -29,7 +31,7 @@ typedef struct {
     uint8_t bits_left;
 } GB_midi_t;
 
-void GB_connect_midi(GB_gameboy_t *gb);
+void GB_connect_midi(GB_gameboy_t *gb, GB_midi_output_byte_callback_t cb);
 bool GB_midi_is_enabled(GB_gameboy_t *gb);
 void GB_midi_input_byte(GB_gameboy_t *gb, uint8_t byte);
 #ifdef GB_INTERNAL
