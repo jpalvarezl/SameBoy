@@ -276,6 +276,7 @@ typedef void (*GB_infrared_callback_t)(GB_gameboy_t *gb, bool on);
 typedef void (*GB_rumble_callback_t)(GB_gameboy_t *gb, double rumble_amplitude);
 typedef void (*GB_serial_transfer_bit_start_callback_t)(GB_gameboy_t *gb, bool bit_to_send);
 typedef bool (*GB_serial_transfer_bit_end_callback_t)(GB_gameboy_t *gb);
+typedef void (*GB_midi_output_byte_callback_t)(GB_gameboy_t *gb, uint8_t byte);
 typedef void (*GB_joyp_write_callback_t)(GB_gameboy_t *gb, uint8_t value);
 typedef void (*GB_icd_pixel_callback_t)(GB_gameboy_t *gb, uint8_t row);
 typedef void (*GB_icd_hreset_callback_t)(GB_gameboy_t *gb);

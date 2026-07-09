@@ -1,9 +1,18 @@
 #include "gb.h"
 #include <string.h>
 
-static void serial_start(GB_gameboy_t *gb, bool bit_received) { 
-    // TODO: protocol hook
+static void serial_start(GB_gameboy_t *gb, bool bit_received) {
+    gb->midi.byte_being_received <<= 1;
+    gb->midi.byte_being_received |= bit_received ? 1 : 0;
+    gb->midi.bits_received++;
+
+    if (gb->midi.bits_received == 8) {
+        GB_log(gb, "MIDI out: %02X\n", gb->midi.byte_being_received);
+        gb->midi.bits_received = 0;
+        gb->midi.byte_being_received = 0;
+    }
 }
+
 static bool serial_end(GB_gameboy_t *gb) { 
     // TODO: protocol hook
     return true; 
