@@ -2,6 +2,7 @@
 #import <CoreAudio/CoreAudio.h>
 #import <Core/gb.h>
 #import <CoreMIDI/CoreMIDI.h>
+#import <mach/mach_time.h> // monotonic clock for the MIDI-out stop watchdog
 #import "GBAudioClient.h"
 #import "Document.h"
 #import "GBApp.h"
@@ -130,6 +131,18 @@
     /* MIDI input (CoreMIDI). Per-Document: this is our end of the emulated serial cable. */
     MIDIClientRef _midiClient;
     MIDIPortRef _midiInputPort;
+
+    /* MIDI output (CoreMIDI). Independent routing: the Game Boy can also drive MIDI *out*
+       (LSDJ as clock master). We translate its serial byte stream to MIDI on the way out. */
+    MIDIPortRef _midiOutputPort;
+    MIDIEndpointRef _midiOutputDestination; // 0 == none chosen
+    BOOL _midiOutRunning;          // true between MIDI START (0xFA) and STOP (0xFC)
+    uint64_t _midiOutLastByteMach;  // host time of the last out-byte (stop watchdog)
+    uint64_t _midiOutEmulatedTicks; // elapsed emulated time, accumulated from GB_run()
+    uint64_t _midiOutAnchorTicks;   // emulated time corresponding to _midiOutAnchorMach
+    uint64_t _midiOutAnchorMach;    // host-time anchor used for CoreMIDI packet timestamps
+    NSTimer *_midiOutStopTimer;     // periodic: a gap with no bytes => LSDJ stopped => 0xFC
+    NSLock *_midiOutLock;           // guards the MIDI-out state above + the MIDISend (emu vs main thread)
 }
 
 static void boot_rom_load(GB_gameboy_t *gb, GB_boot_rom_t type)
@@ -216,6 +229,39 @@ static time_t getWorkboyTime(GB_gameboy_t *gb)
     return time(NULL) - [[NSUserDefaults standardUserDefaults] integerForKey:@"GBWorkboyTimeOffset"];
 }
 
+static mach_timebase_info_data_t mach_timebase(void)
+{
+    static mach_timebase_info_data_t timebase;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        mach_timebase_info(&timebase);
+    });
+    return timebase;
+}
+
+// Convert a mach_absolute_time() delta to nanoseconds. Only small deltas reach this helper.
+static uint64_t mach_delta_to_ns(uint64_t delta)
+{
+    mach_timebase_info_data_t timebase = mach_timebase();
+    return delta * timebase.numer / timebase.denom;
+}
+
+// Convert a duration in seconds to mach_absolute_time() units without an overflowing integer
+// multiply. This is used to map exact emulated time onto CoreMIDI's host-time clock.
+static uint64_t seconds_to_mach(double seconds)
+{
+    mach_timebase_info_data_t timebase = mach_timebase();
+    return seconds * 1000000000.0 * timebase.denom / timebase.numer;
+}
+
+// MIDI out (GB -> host): the core hands us each completed byte the Game Boy clocks out, on the
+// emulation thread. We translate LSDJ's clock-master stream to MIDI (see -midiOutByte:).
+static void midiOut(GB_gameboy_t *gb, uint8_t byte)
+{
+    Document *self = (__bridge Document *)GB_get_user_data(gb);
+    [self midiOutByte:byte];
+}
+
 static void audioCallback(GB_gameboy_t *gb, GB_sample_t *sample)
 {
     Document *self = (__bridge Document *)GB_get_user_data(gb);
@@ -267,6 +313,7 @@ static void debuggerReloadCallback(GB_gameboy_t *gb)
         _debuggerInputQueue = [[NSMutableArray alloc] init];
         _consoleOutputLock = [[NSRecursiveLock alloc] init];
         _audioLock = [[NSCondition alloc] init];
+        _midiOutLock = [[NSLock alloc] init];
         _volume = [[NSUserDefaults standardUserDefaults] doubleForKey:@"GBVolume"];
     }
     return self;
@@ -589,7 +636,7 @@ static unsigned *multiplication_table_for_frequency(unsigned frequency)
                 }
             }
             else {
-                GB_run(&_gb);
+                _midiOutEmulatedTicks += GB_run(&_gb);
             }
             if (unlikely(_pendingAtomicBlock)) {
                 _pendingAtomicBlock();
@@ -824,6 +871,7 @@ static unsigned *multiplication_table_for_frequency(unsigned frequency)
 {
     [_cameraSession stopRunning];
     [self teardownMIDIInput]; // stop the MIDI callback before freeing the _gb it feeds
+    [self teardownMIDIOutput];
     self.view.gb = NULL;
     GB_free(&_gb);
     if (_cameraImage) {
@@ -1388,6 +1436,7 @@ static bool is_path_writeable(const char *path)
 {
     [self disconnectLinkCable];
     [self teardownMIDIInput];
+    [self teardownMIDIOutput];
     if (!self.gbsPlayerView) {
         [[NSUserDefaults standardUserDefaults] setInteger:self.mainWindow.frame.size.width forKey:@"LastWindowWidth"];
         [[NSUserDefaults standardUserDefaults] setInteger:self.mainWindow.frame.size.height forKey:@"LastWindowHeight"];
@@ -1477,13 +1526,24 @@ static bool is_path_writeable(const char *path)
     }
     else if ([anItem action] == @selector(selectMIDISource:)) {
         bool isMIDI = GB_get_built_in_accessory(&_gb) == GB_ACCESSORY_MIDI;
+        NSString *selected = isMIDI ? [[NSUserDefaults standardUserDefaults] stringForKey:@"GBMIDIInputSource"] : nil;
         NSString *itemSource = [(NSMenuItem *)anItem representedObject];
-        NSString *selected = [[NSUserDefaults standardUserDefaults] stringForKey:@"GBMIDIInputSource"];
         if (itemSource == nil) {
-            [(NSMenuItem *)anItem setState:!isMIDI];   // the "None" row
+            [(NSMenuItem *)anItem setState:(selected == nil)];   // the "None" row
         }
         else {
-            [(NSMenuItem *)anItem setState:(isMIDI && [itemSource isEqualToString:selected])];
+            [(NSMenuItem *)anItem setState:[itemSource isEqualToString:selected]];
+        }
+    }
+    else if ([anItem action] == @selector(selectMIDIDestination:)) {
+        bool isMIDI = GB_get_built_in_accessory(&_gb) == GB_ACCESSORY_MIDI;
+        NSString *selected = isMIDI ? [[NSUserDefaults standardUserDefaults] stringForKey:@"GBMIDIOutputDestination"] : nil;
+        NSString *itemDest = [(NSMenuItem *)anItem representedObject];
+        if (itemDest == nil) {
+            [(NSMenuItem *)anItem setState:(selected == nil)];   // the "None" row
+        }
+        else {
+            [(NSMenuItem *)anItem setState:[itemDest isEqualToString:selected]];
         }
     }
     else if ([anItem action] == @selector(connectLinkCable:)) {
@@ -2551,6 +2611,7 @@ enum GBWindowResizeAction
 {
     [self disconnectLinkCable];
     [self teardownMIDIInput];
+    [self teardownMIDIOutput];
     [self performAtomicBlock:^{
         GB_disconnect_serial(&_gb);
     }];
@@ -2560,6 +2621,7 @@ enum GBWindowResizeAction
 {
     [self disconnectLinkCable];
     [self teardownMIDIInput];
+    [self teardownMIDIOutput];
     [self performAtomicBlock:^{
         GB_connect_printer(&_gb, printImage, printDone);
     }];
@@ -2569,8 +2631,35 @@ enum GBWindowResizeAction
 {
     [self disconnectLinkCable];
     [self teardownMIDIInput];
+    [self teardownMIDIOutput];
     [self performAtomicBlock:^{
         GB_connect_workboy(&_gb, setWorkboyTime, getWorkboyTime);
+    }];
+}
+
+/* The MIDI accessory is one *bidirectional* device: it counts as connected whenever an input
+   source OR an output destination is chosen, so the two routings can be toggled independently. */
+- (BOOL)anyMIDIRoutingChosen
+{
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    return [defaults stringForKey:@"GBMIDIInputSource"] != nil ||
+           [defaults stringForKey:@"GBMIDIOutputDestination"] != nil;
+}
+
+- (void)connectMIDIAccessory
+{
+    if (GB_get_built_in_accessory(&_gb) == GB_ACCESSORY_MIDI) return; // already connected -- don't reset gb->midi
+    [self disconnectLinkCable];
+    [self performAtomicBlock:^{
+        GB_connect_midi(&_gb, midiOut);
+    }];
+}
+
+- (void)disconnectMIDIAccessoryIfIdle
+{
+    if ([self anyMIDIRoutingChosen]) return; // still routed the other way -- keep it connected
+    [self performAtomicBlock:^{
+        GB_disconnect_serial(&_gb);
     }];
 }
 
@@ -2580,41 +2669,77 @@ enum GBWindowResizeAction
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     if (name) {
         [defaults setObject:name forKey:@"GBMIDIInputSource"];
-        [self disconnectLinkCable];
-        [self performAtomicBlock:^{
-            GB_connect_midi(&_gb, NULL); // TODO(MIDI out): pass a real output callback when CoreMIDI-out lands
-        }];
+        [self connectMIDIAccessory];
         [self setupMIDIInput];
     }
     else {
         [defaults removeObjectForKey:@"GBMIDIInputSource"];
         [self teardownMIDIInput];
-        [self performAtomicBlock:^{
-            GB_disconnect_serial(&_gb);
-        }];
+        [self disconnectMIDIAccessoryIfIdle];
     }
 }
 
-/* Build the MIDI submenu: "None" plus every available input source. A MIDI *output*
-   section (destinations) will be appended below the input list in Phase 3. */
+- (IBAction)selectMIDIDestination:(NSMenuItem *)sender
+{
+    NSString *name = sender.representedObject; // nil == the "None" row
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    if (name) {
+        [defaults setObject:name forKey:@"GBMIDIOutputDestination"];
+        [self connectMIDIAccessory];
+        [self setupMIDIOutput];
+    }
+    else {
+        [defaults removeObjectForKey:@"GBMIDIOutputDestination"];
+        [self teardownMIDIOutput];
+        [self disconnectMIDIAccessoryIfIdle];
+    }
+}
+
+/* Build the MIDI submenu, rebuilt on every open (so hotplugged devices appear for free). Two
+   sections: Input (host -> Game Boy) listing sources, and Output (Game Boy -> host) listing
+   destinations. Each section has a disabled header and a "None" row; the checkmarks are derived
+   in -validateUserInterfaceItem:. */
 - (void)populateMIDIMenu:(NSMenu *)menu
 {
     [menu removeAllItems];
 
-    NSMenuItem *none = [[NSMenuItem alloc] initWithTitle:@"None"
-                                                  action:@selector(selectMIDISource:) keyEquivalent:@""];
-    [menu addItem:none];
+    NSMenuItem *inHeader = [[NSMenuItem alloc] initWithTitle:@"Input (to Game Boy)"
+                                                      action:NULL keyEquivalent:@""];
+    inHeader.enabled = NO; // a disabled, action-less item reads as a section header
+    [menu addItem:inHeader];
 
-    ItemCount count = MIDIGetNumberOfSources();
-    if (count) {
-        [menu addItem:[NSMenuItem separatorItem]];
-    }
-    for (ItemCount i = 0; i < count; i++) {
+    NSMenuItem *inNone = [[NSMenuItem alloc] initWithTitle:@"None"
+                                                    action:@selector(selectMIDISource:) keyEquivalent:@""];
+    [menu addItem:inNone];
+
+    ItemCount sources = MIDIGetNumberOfSources();
+    for (ItemCount i = 0; i < sources; i++) {
         NSString *name = [self nameOfMIDIEndpoint:MIDIGetSource(i)];
         if (!name) continue;
         NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:name
                                                       action:@selector(selectMIDISource:) keyEquivalent:@""];
         item.representedObject = name; // the choice we persist and match against
+        [menu addItem:item];
+    }
+
+    [menu addItem:[NSMenuItem separatorItem]];
+
+    NSMenuItem *outHeader = [[NSMenuItem alloc] initWithTitle:@"Output (from Game Boy)"
+                                                       action:NULL keyEquivalent:@""];
+    outHeader.enabled = NO;
+    [menu addItem:outHeader];
+
+    NSMenuItem *outNone = [[NSMenuItem alloc] initWithTitle:@"None"
+                                                     action:@selector(selectMIDIDestination:) keyEquivalent:@""];
+    [menu addItem:outNone];
+
+    ItemCount destinations = MIDIGetNumberOfDestinations();
+    for (ItemCount i = 0; i < destinations; i++) {
+        NSString *name = [self nameOfMIDIEndpoint:MIDIGetDestination(i)];
+        if (!name) continue;
+        NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:name
+                                                      action:@selector(selectMIDIDestination:) keyEquivalent:@""];
+        item.representedObject = name;
         [menu addItem:item];
     }
 }
@@ -2630,8 +2755,33 @@ enum GBWindowResizeAction
     return (__bridge_transfer NSString *)name; // we own the +1 reference; hand it to ARC
 }
 
-/* Open a CoreMIDI client + input port and connect the source the user chose (matched by
-   name). Called when a source is selected; torn down whenever we leave MIDI. */
+/* The CoreMIDI client is shared by the input and output ports: create it lazily and dispose it
+   only once neither direction needs it. */
+- (void)ensureMIDIClient
+{
+    if (_midiClient) return;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations" // legacy CoreMIDI API for the 10.9 floor
+    OSStatus status = MIDIClientCreate(CFSTR("SameBoy"), NULL, NULL, &_midiClient);
+#pragma clang diagnostic pop
+    if (status != noErr) {
+        NSLog(@"SameBoy: MIDIClientCreate failed (%d)", (int)status);
+        _midiClient = 0;
+    }
+}
+
+- (void)disposeMIDIClientIfIdle
+{
+    if (_midiInputPort || _midiOutputPort || !_midiClient) return; // still in use, or none
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    MIDIClientDispose(_midiClient);
+#pragma clang diagnostic pop
+    _midiClient = 0;
+}
+
+/* Open a CoreMIDI input port and connect the source the user chose (matched by name). Called
+   when a source is selected; torn down whenever we leave MIDI input. */
 - (void)setupMIDIInput
 {
     [self teardownMIDIInput]; // idempotent: always start from a clean slate
@@ -2639,16 +2789,13 @@ enum GBWindowResizeAction
     NSString *wanted = [[NSUserDefaults standardUserDefaults] stringForKey:@"GBMIDIInputSource"];
     if (!wanted) return; // no source chosen -> nothing to open
 
+    [self ensureMIDIClient];
+    if (!_midiClient) return;
+
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations" // legacy CoreMIDI API for the 10.9 floor
-    OSStatus status = MIDIClientCreate(CFSTR("SameBoy"), NULL, NULL, &_midiClient);
-    if (status != noErr) {
-        NSLog(@"SameBoy: MIDIClientCreate failed (%d)", (int)status);
-        return;
-    }
-
-    status = MIDIInputPortCreate(_midiClient, CFSTR("SameBoy Input"), midiRead,
-                                 (__bridge void *)self, &_midiInputPort);
+    OSStatus status = MIDIInputPortCreate(_midiClient, CFSTR("SameBoy Input"), midiRead,
+                                          (__bridge void *)self, &_midiInputPort);
 #pragma clang diagnostic pop
     if (status != noErr) {
         NSLog(@"SameBoy: MIDIInputPortCreate failed (%d)", (int)status);
@@ -2662,7 +2809,10 @@ enum GBWindowResizeAction
     for (ItemCount i = 0; i < count; i++) {
         MIDIEndpointRef source = MIDIGetSource(i);
         if ([wanted isEqualToString:[self nameOfMIDIEndpoint:source]]) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
             MIDIPortConnectSource(_midiInputPort, source, NULL);
+#pragma clang diagnostic pop
         }
     }
 }
@@ -2670,13 +2820,146 @@ enum GBWindowResizeAction
 - (void)teardownMIDIInput
 {
     if (_midiInputPort) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
         MIDIPortDispose(_midiInputPort); // also disconnects its sources
+#pragma clang diagnostic pop
         _midiInputPort = 0;
     }
-    if (_midiClient) {
-        MIDIClientDispose(_midiClient);
-        _midiClient = 0;
+    [self disposeMIDIClientIfIdle];
+}
+
+/* Caller must hold _midiOutLock. Wrap up to a few bytes in a MIDIPacketList and send them at the
+   given CoreMIDI host timestamp (0 means now); no-op if output isn't set up. */
+- (void)sendMIDIOutLocked:(const uint8_t *)data length:(UInt16)length atHostTime:(MIDITimeStamp)timestamp
+{
+    if (!_midiOutputPort || !_midiOutputDestination) return;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations" // legacy CoreMIDI API for the 10.9 floor
+    MIDIPacketList list;
+    MIDIPacket *packet = MIDIPacketListInit(&list);
+    packet = MIDIPacketListAdd(&list, sizeof(list), packet, timestamp, length, data);
+    if (packet) {
+        MIDISend(_midiOutputPort, _midiOutputDestination, &list);
     }
+#pragma clang diagnostic pop
+}
+
+/* MIDI out (GB -> host): translate LSDJ's clock-master serial stream to MIDI. Each byte LSDJ
+   clocks out is one 24-PPQN tick (0xF8); the first byte after silence starts the transport
+   (0xFA); the watchdog stops it (0xFC) once the bytes stop. Runs on the emulation thread.
+
+   SameBoy computes ahead and sleeps in chunks, so callback wall times are uneven even though the
+   emulated clock is exact. Map the accumulated GB_run() ticks onto CoreMIDI host time, with 25ms
+   of look-ahead, to reconstruct the original even spacing instead of sending each clock "now". */
+- (void)midiOutByte:(uint8_t)byte
+{
+    [_midiOutLock lock];
+    if (_midiOutputPort && _midiOutputDestination) {
+        uint64_t now = mach_absolute_time();
+        _midiOutLastByteMach = now;
+        if (!_midiOutRunning) {
+            _midiOutRunning = YES;
+            _midiOutAnchorTicks = _midiOutEmulatedTicks;
+            _midiOutAnchorMach = now + seconds_to_mach(0.025);
+            uint8_t start = 0xFA; // MIDI START
+            [self sendMIDIOutLocked:&start length:1 atHostTime:_midiOutAnchorMach];
+        }
+
+        uint64_t elapsedTicks = _midiOutEmulatedTicks - _midiOutAnchorTicks;
+        double elapsedSeconds = elapsedTicks / (2.0 * GB_get_clock_rate(&_gb));
+        MIDITimeStamp timestamp = _midiOutAnchorMach + seconds_to_mach(elapsedSeconds);
+        uint8_t clock = 0xF8; // one per LSDJ byte == 24 PPQN
+        [self sendMIDIOutLocked:&clock length:1 atHostTime:timestamp];
+    }
+    [_midiOutLock unlock];
+}
+
+/* Watchdog on the main thread: if LSDJ has clocked nothing for a while it has stopped, so end the
+   MIDI transport. At 24 PPQN even a very slow tempo sends a byte well under 100ms apart. */
+- (void)midiOutStopCheck:(NSTimer *)timer
+{
+    [_midiOutLock lock];
+    if (_midiOutRunning &&
+        mach_delta_to_ns(mach_absolute_time() - _midiOutLastByteMach) > 300000000ULL /* 300ms */) {
+        _midiOutRunning = NO;
+        uint8_t stop = 0xFC; // MIDI STOP
+        [self sendMIDIOutLocked:&stop length:1 atHostTime:0];
+    }
+    [_midiOutLock unlock];
+}
+
+/* Open a CoreMIDI output port and resolve the destination the user chose (matched by name), then
+   start the stop watchdog. Called when a destination is selected; torn down whenever we leave. */
+- (void)setupMIDIOutput
+{
+    [self teardownMIDIOutput]; // idempotent
+
+    NSString *wanted = [[NSUserDefaults standardUserDefaults] stringForKey:@"GBMIDIOutputDestination"];
+    if (!wanted) return;
+
+    [self ensureMIDIClient];
+    if (!_midiClient) return;
+
+    MIDIPortRef port = 0;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations" // legacy CoreMIDI API for the 10.9 floor
+    OSStatus status = MIDIOutputPortCreate(_midiClient, CFSTR("SameBoy Output"), &port);
+#pragma clang diagnostic pop
+    if (status != noErr) {
+        NSLog(@"SameBoy: MIDIOutputPortCreate failed (%d)", (int)status);
+        [self disposeMIDIClientIfIdle];
+        return;
+    }
+
+    // Endpoint refs aren't stable across launches, so match by name. If the device isn't present
+    // the destination stays 0 and we simply send nothing.
+    MIDIEndpointRef destination = 0;
+    ItemCount count = MIDIGetNumberOfDestinations();
+    for (ItemCount i = 0; i < count; i++) {
+        MIDIEndpointRef candidate = MIDIGetDestination(i);
+        if ([wanted isEqualToString:[self nameOfMIDIEndpoint:candidate]]) {
+            destination = candidate;
+            break;
+        }
+    }
+
+    [_midiOutLock lock];
+    _midiOutputPort = port;
+    _midiOutputDestination = destination;
+    _midiOutRunning = NO;
+    [_midiOutLock unlock];
+
+    _midiOutStopTimer = [NSTimer scheduledTimerWithTimeInterval:0.05
+                                                         target:self
+                                                       selector:@selector(midiOutStopCheck:)
+                                                       userInfo:nil
+                                                        repeats:YES];
+}
+
+- (void)teardownMIDIOutput
+{
+    [_midiOutStopTimer invalidate];
+    _midiOutStopTimer = nil;
+
+    [_midiOutLock lock];
+    if (_midiOutRunning) {
+        uint8_t stop = 0xFC; // tell the receiver we've stopped before the port goes away
+        [self sendMIDIOutLocked:&stop length:1 atHostTime:0];
+        _midiOutRunning = NO;
+    }
+    MIDIPortRef port = _midiOutputPort;
+    _midiOutputPort = 0;
+    _midiOutputDestination = 0;
+    [_midiOutLock unlock];
+
+    if (port) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        MIDIPortDispose(port);
+#pragma clang diagnostic pop
+    }
+    [self disposeMIDIClientIfIdle];
 }
 
 - (void)setFileURL:(NSURL *)fileURL

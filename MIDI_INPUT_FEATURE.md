@@ -1,26 +1,95 @@
 # MIDI Input Accessory — Design & Learning Notes
 
-> Goal: Add a **MIDI Input** serial accessory to SameBoy (like *Game Boy Printer* or
-> *Workboy*) so that a host MIDI source can be sent into the emulator, and ROMs like
-> **mGB** and **LSDJ** consume it over the emulated Game Boy Link Cable — i.e. a built‑in
-> software **Arduinoboy**.
+> Current goal: add a contained **MIDI Input accessory for mGB**. A host MIDI source sends
+> raw MIDI bytes through the emulated Game Boy Link port, matching the observable behavior
+> of an Arduinoboy-style adapter in mGB mode.
 >
-> This document is a self‑study guide. It explains *why* the feature is shaped the way it
-> is, points at the exact code you'll touch, and links to primary references so you can
-> implement it yourself as a learning exercise.
+> A broader, explicitly modeful **Arduinoboy-compatible accessory** is a plausible follow-up.
+> Standard LSDJ MIDI clock synchronization has already been prototyped successfully, but its
+> inclusion is pending a scope discussion with SameBoy's maintainer; it is not silently part
+> of the first PR.
+>
+> This document is a self-study guide and a record of those scope decisions. It explains
+> *why* the feature is shaped the way it is, points at the exact code involved, and links to
+> primary references.
 
 ---
 
 ## 1. The problem, in one paragraph
 
-mGB and LSDJ do **not** speak MIDI. They speak the Game Boy Link Cable serial protocol.
-On real hardware an **Arduinoboy** sits between a MIDI cable and the Game Boy Link port,
-translating MIDI into the byte stream those ROMs expect (and vice‑versa). In SameBoy today
-the only things you can attach to the serial port are the **Printer**, the **Workboy**, or
-**another running emulator instance** (the two‑window Link Cable). There is no virtual
-device to feed data in, which is exactly why "connect the cable" feels like a dead end when
-you only have one window open. The feature adds a virtual Arduinoboy‑like device plus a MIDI
-source picker.
+mGB parses standard MIDI messages, but it receives their bytes through the Game Boy Link
+port rather than a native MIDI connector. On real hardware an **Arduinoboy** in mGB mode (or
+a compatible USB-MIDI adapter) provides the electrical clock and serializes those raw bytes.
+SameBoy can currently attach a **Printer**, a **Workboy**, or **another emulator instance**,
+but its virtual Link Cable cannot connect Ableton or a MIDI controller to mGB. The contained
+feature fills exactly that gap: a frontend MIDI source picker plus a frontend-neutral core
+API that clocks raw bytes into an armed, external-clock Game Boy serial transfer.
+
+SameBoy's existing two-window Link Cable already handles native ROM-to-ROM protocols such as
+LSDJ-to-LSDJ synchronization; both LSDJ instances use `SYNC: LSDJ`, and one becomes `LEAD`.
+MIDI translation is only needed when crossing between the Link protocol and an external DAW
+or MIDI device.
+
+## 1.1 Current scope decision and upstream proposal
+
+The implementation has established two different, valid scopes:
+
+1. **Contained first contribution — mGB MIDI input.** Raw MIDI bytes are queued in the core
+   and clocked into mGB; Cocoa supplies CoreMIDI endpoint selection. This is complete and
+   verified with Ableton through an IAC bus.
+2. **Possible follow-up — an Arduinoboy-compatible peripheral.** A real Arduinoboy is
+   modeful: mGB is raw byte transport, while standard LSDJ slave/master sync translates
+   between MIDI real-time messages and Link clock behavior. The output prototype correctly
+   converted LSDJ `SYNC: LSDJ` into MIDI Start/Clock/Stop and locked Ableton to LSDJ's tempo.
+
+Do not conflate the second scope with musical MIDI output from ordinary LSDJ tracks. Standard
+LSDJ 9.4.2 has `SYNC: MIDI` as a clock-follower mode and does **not** expose normal song notes
+as MIDI Note On/Off. Historical Arduinoboy MIDIOUT support required a special LSDJ ROM.
+
+The next action is to ask SameBoy's maintainer which model belongs upstream before doing more
+protocol work. Suggested issue draft:
+
+> **Title: Proposal: MIDI input accessory for mGB, with possible Arduinoboy-compatible modes**
+>
+> I have a working prototype of a frontend-neutral MIDI serial accessory plus a Cocoa
+> CoreMIDI source picker. It clocks raw host MIDI bytes into an external-clock Game Boy
+> serial transfer, matching an Arduinoboy-compatible adapter in mGB mode. I have verified
+> Ableton → IAC Driver → SameBoy → mGB live, and added focused C tests around the queue and
+> serial transfer behavior.
+>
+> Before preparing a PR, I would like guidance on the preferred scope and naming:
+>
+> 1. Would a contained **mGB MIDI-input accessory** be useful as its own contribution?
+> 2. Should the core model remain a generic raw MIDI byte pipe, or should it be named and
+>    designed as a modeful **Arduinoboy-compatible accessory**?
+> 3. If the latter is desirable, should standard LSDJ MIDI clock follower/leader modes be
+>    separate follow-up changes?
+>
+> The proposed first change keeps CoreMIDI entirely in the Cocoa frontend. The core only
+> owns a bounded byte queue and Game Boy serial clocking, so other frontends could provide
+> MIDI later. It does not inspect ROM state or translate ordinary LSDJ notes.
+>
+> I also prototyped LSDJ leader → MIDI Clock/Start/Stop and confirmed that Ableton follows
+> its tempo, but I am deliberately holding that work back until the accessory boundary is
+> agreed.
+
+### Research boundary: other music ROMs
+
+Research did not reveal a universal "Game Boy MIDI" wire protocol:
+
+- **mGB** is the clear raw-byte case and the direct target for this contribution.
+- **LSDJ** uses native Link synchronization between two Game Boys; an Arduinoboy translates
+  that behavior only when connecting to MIDI equipment. Standard LSDJ does not send track
+  notes as MIDI.
+- **FMS** documents receive-only Arduinoboy/Pocket MIDI synchronization, but it is GBA
+  software and cannot run in SameBoy.
+- **nanoloop** behavior varies by product generation. Its official USB adapter has distinct
+  MIDI (mGB) and SYNC modes; current cartridges may use cartridge-integrated sync jacks, and
+  nanoloop-specific Link sync uses line pulse patterns rather than a universal MIDI byte
+  stream.
+
+This supports keeping the first PR mGB-specific while discussing a larger, explicitly
+modeful adapter separately.
 
 ---
 
@@ -85,23 +154,30 @@ Because it's *raw MIDI passthrough*, **mGB is the easiest and highest‑value fi
 
 ### 2.3 LSDJ (Little Sound Dj)
 
-LSDJ uses several sync/keyboard modes chosen on its tempo/project screens, and the Arduinoboy
-*translates* rather than passing raw MIDI:
+Standard LSDJ 9.4.2 has two relevant but distinct synchronization paths:
 
-- **LSDJ (slave) sync** — Arduinoboy clocks LSDJ; sends transport/tempo bytes. GB is slave.
-- **LSDJ (master) sync** — LSDJ is the master and emits a byte per row/step; Arduinoboy reads
-  it and produces MIDI clock/notes. GB is **master** here.
-- **Keyboard mode** — MIDI notes drive LSDJ instruments; Arduinoboy translates note data.
+- **`SYNC: LSDJ`** is its native Game Boy-to-Game Boy protocol. With SameBoy's existing
+  virtual Link Cable, both instances use this mode; the one started first becomes `LEAD`.
+- **`SYNC: MIDI`** makes LSDJ a follower. A physical adapter consumes MIDI Start/Clock/Stop
+  and converts those messages into Link clock behavior; it does not merely pass every MIDI
+  byte through as mGB mode does.
+- When LSDJ is the `SYNC: LSDJ` leader, an Arduinoboy Master Sync adapter can observe its Link
+  cadence and generate MIDI Start/Clock/Stop. This hardware-faithful direction was
+  prototyped successfully, but remains outside the first mGB-input scope pending maintainer
+  discussion.
 
-So LSDJ needs both directions and per‑mode translation → treat it as **phase 2**, after mGB.
+Standard LSDJ does **not** output the musical notes from its four tracks as ordinary MIDI.
+The Arduinoboy firmware can emit one startup row marker, but that is not song-note playback.
+Historical MIDIOUT/MIDIMAP behavior depended on special LSDJ ROMs and is not a target here.
 
 ### 2.4 Direction-of-clocking cheat sheet
 
-| Target | Data direction | Clock master | SameBoy mechanism |
+| Adapter mode | Data/meaning | Clock master | SameBoy mechanism/status |
 |---|---|---|---|
-| mGB | MIDI → GB | **our device** | generate clock; push bits with `GB_serial_set_data_bit` |
-| LSDJ keyboard / slave sync | MIDI → GB | **our device** | same, but translate MIDI → LSDJ bytes |
-| LSDJ master sync / note‑out | GB → MIDI | **the Game Boy** | capture bytes via `serial_transfer_bit_start_callback` → emit MIDI |
+| mGB | raw MIDI bytes → GB | **adapter** | current target: `GB_serial_set_data_bit`, MSB-first |
+| LSDJ MIDI follower | MIDI real-time → Link clock behavior | **adapter** | possible future Arduinoboy mode; not raw passthrough |
+| LSDJ Link leader → MIDI | Link cadence → MIDI Start/Clock/Stop | **Game Boy** | successful prototype; pending scope decision |
+| LSDJ ↔ LSDJ | native Link protocol, no MIDI | whichever instance is `LEAD` | already handled by SameBoy's virtual Link Cable |
 
 ---
 
@@ -209,34 +285,34 @@ thread. Push bytes through a lock‑free/atomic ring buffer (or SameBoy's existi
 
 ## 5. Suggested implementation plan (incremental)
 
-### Phase 0 — Scaffolding
-- [ ] `Core/midi.h` / `Core/midi.c`: define `GB_midi_t` state struct + a MIDI‑byte ring buffer.
-- [ ] Add `GB_ACCESSORY_MIDI` to the `GB_accessory_t` enum (`Core/gb.h`).
-- [ ] Add a `GB_midi_t midi;` member to the `accessory` `GB_SECTION` union (`Core/gb.h`).
-- [ ] `GB_connect_midi(gb, ...)` — set accessory, register callbacks, zero state.
-- [ ] `GB_midi_input_byte(gb, uint8_t)` — enqueue a raw MIDI byte from the frontend.
+### Phase 0 — Scaffolding — complete
+- [x] `Core/midi.h` / `Core/midi.c`: `GB_midi_t` state and bounded MIDI-byte ring buffer.
+- [x] `GB_ACCESSORY_MIDI` and accessory-section state.
+- [x] `GB_connect_midi` and `GB_midi_input_byte` frontend-neutral API.
 
-### Phase 1 — mGB (MIDI → GB, raw passthrough) — *the milestone*
-- [ ] Hook `GB_serial_master_edge()` (or a small helper it calls) so that when the GB is an
-      armed external‑clock slave and the queue is non‑empty, we clock one byte in bit‑by‑bit
-      via `GB_serial_set_data_bit`, pacing it so mGB's ISR can re‑arm `SC` between bytes.
-- [ ] Test with the mGB ROM: play notes from a DAW / MIDI keyboard, hear sound.
-- [ ] **Tests:** add an automated test in the project's style (see Phase 5 / §6). SameBoy
-      has *no* unit tests and *no* existing tests for serial devices (Printer/Workboy have
-      none), so "matching other serial devices" means following the ROM‑based hash model
-      and, since the tester can't inject serial input today, extending it to do so.
+### Phase 1 — mGB (MIDI → GB, raw passthrough) — complete
+- [x] When the GB is an armed external-clock slave and the queue is non-empty, clock bytes
+      in MSB-first through `GB_serial_set_data_bit`.
+- [x] Verify live with Ableton / IAC Driver → mGB.
+- [x] Add a focused C harness covering queue behavior and serial pumping. This harness is a
+      development stopgap rather than a new project-wide test framework.
 
-### Phase 2 — macOS UI + CoreMIDI
-- [ ] Add a "MIDI Input" item to the Connect submenu in `MainMenu.xib` with a dynamic
-      source submenu (copy the `GBApp.m` Link‑Cable partner pattern).
-- [ ] `connectMIDI:` in `Document.m` → `GB_disconnect_serial` + `GB_connect_midi`; add a
-      `validateUserInterfaceItem:` branch for the checkmark.
-- [ ] Create the `MIDIClientRef` / input port; read callback → `GB_midi_input_byte`.
-- [ ] Persist the chosen source name in `NSUserDefaults`.
+### Phase 2 — macOS UI + CoreMIDI — complete
+- [x] Dynamic MIDI input-source submenu.
+- [x] CoreMIDI client/input port and read callback → `GB_midi_input_byte`.
+- [x] Source selection persistence and teardown.
 
-### Phase 3 — LSDJ (later)
-- [ ] Add sync‑mode handling (LSDJ slave/master sync, keyboard) with MIDI↔byte translation.
-- [ ] GB → MIDI OUT direction via `serial_transfer_bit_start_callback` (for LSDJ master sync).
+Commit `39ae967` is the input-only integration boundary.
+
+### Phase 3 — output experiment — proven, but scope pending
+- [x] Capture Game Boy-master serial bytes through a registered output callback.
+- [x] Prototype standard LSDJ leader → MIDI Start/Clock/Stop.
+- [x] Reconstruct CoreMIDI timestamps from emulated time; Ableton follows LSDJ tempo.
+- [ ] Do **not** prepare this as part of the mGB PR until the maintainer responds to §1.1.
+
+Commits `4d64eba` and `61bdef9`, plus the current uncommitted Cocoa output changes, belong to
+this exploratory phase. Musical note extraction and historical special-ROM modes are not
+planned.
 
 ### Phase 4 — Other frontends (optional)
 - [ ] SDL frontend MIDI input (RtMidi / platform APIs) mirroring the Cocoa accessory.
@@ -293,12 +369,17 @@ thread. Push bytes through a lock‑free/atomic ring buffer (or SameBoy's existi
 - Pan Docs — full index: https://gbdev.io/pandocs/
 - gbdev community & resources: https://gbdev.io/
 
-### Arduinoboy / mGB / LSDJ (the protocols we're emulating)
-- Arduinoboy (Trash80) — the reference hardware & source: https://github.com/trash80/Arduinoboy
-- mGB (Trash80) — the MIDI synth ROM: https://github.com/trash80/mGB
-- LSDJ official site & docs: https://www.littlesounddj.com/lsd/index.php
-- LSDJ manual (sync/keyboard/MIDI modes): https://www.littlesounddj.com/lsd/latest/documentation/
-- Arduinoboy wiki / mode explanations: https://github.com/trash80/Arduinoboy/wiki
+### Arduinoboy / mGB / synchronization research
+- Arduinoboy (Trash80) — behavioral reference; its source headers specify GPLv2, so do not
+  copy firmware implementation into Expat-licensed SameBoy without resolving licensing:
+  https://github.com/trash80/Arduinoboy
+- mGB (Trash80) — the raw-MIDI synth ROM and current target: https://github.com/trash80/mGB
+- LSDJ official site and manuals: https://www.littlesounddj.com/lsd/index.php
+- Arduinoboy mode explanations: https://github.com/trash80/Arduinoboy/wiki
+- FMS external-sync guide (GBA; research only): https://lo-bit.club/fms/guide
+- nanoloop USB-MIDI adapter (separate MIDI and SYNC modes):
+  https://www.nanoloop.com/midi/index.html
+- nanoloop product/sync documentation: https://www.nanoloop.com/sync/index.html
 
 ### CoreMIDI (macOS input)
 - Apple — Core MIDI framework: https://developer.apple.com/documentation/coremidi
@@ -318,10 +399,15 @@ thread. Push bytes through a lock‑free/atomic ring buffer (or SameBoy's existi
 
 ## 8. Notes on contributing upstream
 
-- Work on this fork (`origin = github.com/jpalvarezl/SameBoy`), on the `feature/midi-input`
-  branch, then open a PR against `LIJI32/SameBoy` if you want it upstream.
+- First open the proposal issue in §1.1 and let the maintainer clarify scope/naming before
+  preparing a PR.
+- Work on this fork (`origin = github.com/jpalvarezl/SameBoy`) on `feature/midi-input`.
+- `39ae967` is the input-only boundary. Preserve the later output experiment separately
+  rather than allowing sunk-cost pressure to determine the first PR.
 - Read `CONTRIBUTING.md` and match SameBoy's C style (it's specific about braces/naming).
-- Upstream will likely want the **core device to be frontend‑agnostic** (no CoreMIDI in
-  `Core/`) — keep all CoreMIDI code in `Cocoa/`, and feed the core only raw MIDI bytes via a
-  small public API. That separation also makes SDL/other frontends easy later.
-```
+- Keep the core device frontend-agnostic: no CoreMIDI in `Core/`. For the contained mGB
+  feature, Cocoa feeds only raw MIDI bytes through a small public API.
+- If upstream prefers a true Arduinoboy-compatible peripheral, agree on its mode API and on
+  whether protocol state belongs in the portable core before extending the implementation.
+- A future behavioral reimplementation should avoid copying GPLv2 Arduinoboy firmware into
+  SameBoy's Expat-licensed source without explicit licensing resolution.

@@ -4,9 +4,13 @@ Context for AI agents working in this fork. **Read this first, then read
 `MIDI_INPUT_FEATURE.md`.**
 
 This is a personal fork of [SameBoy](https://github.com/LIJI32/SameBoy) (a Game Boy /
-Game Boy Color emulator). We are adding a **MIDI Input serial accessory** so a host MIDI
-source can drive ROMs like **mGB** and **LSDJ** over the emulated Link Cable — essentially a
-built‑in software **Arduinoboy**.
+Game Boy Color emulator). The current contained contribution is a **MIDI Input serial
+accessory for mGB**: raw host MIDI bytes are clocked into the emulated Link port, matching
+an Arduinoboy-style adapter in mGB mode.
+
+A broader, modeful **Arduinoboy-compatible accessory** (including standard LSDJ MIDI clock
+synchronization) is a possible follow-up, but is **not yet the agreed PR scope**. Ask the
+upstream maintainer before expanding it. See `MIDI_INPUT_FEATURE.md` §1.1.
 
 - Fork remote: `origin = github.com/jpalvarezl/SameBoy`
 - Working branch: `feature/midi-input`
@@ -69,19 +73,24 @@ MIDI work** — we deliberately are not fixing it. (It's compiled out in release
 
 ---
 
-## Progress
+## Progress and scope boundary
 
-- ✅ **Phase 0 — scaffolding** (committed `102d0f8`): `GB_ACCESSORY_MIDI` enum, `GB_midi_t` in
-  the `accessory` `GB_SECTION` union, `Core/midi.{c,h}` stubs, `connectMIDI:` +
-  `validateUserInterfaceItem:` in `Cocoa/Document.m`, "MIDI" item in `Cocoa/MainMenu.xib`.
-  The menu item appears and toggles; the device is a no‑op.
-- 🚧 **Phase 1 — mGB feed logic** (in progress, human implementing): make
-  `GB_midi_input_byte` enqueue; add a feed function that clocks queued bytes into the GB when
-  it's an armed external‑clock slave (`SC & 0x81 == 0x80`) via `GB_serial_set_data_bit`,
-  MSB‑first; call it from `GB_serial_master_edge` in `Core/timing.c`. See `MIDI_INPUT_FEATURE.md`
-  §5 Phase 1 for the spec.
-- ⬜ Phase 2 — macOS UI source picker + CoreMIDI input → `GB_midi_input_byte`.
-- ⬜ Phase 3 — LSDJ modes (sync/keyboard, GB→MIDI out). Phase 4 — SDL. Phase 5 — tests.
+- ✅ **Core MIDI input:** bounded SPSC queue, externally clocked serial feed, timing hook, and
+  focused C harness tests.
+- ✅ **Cocoa MIDI input:** CoreMIDI source connection and dynamic input-source picker.
+- ✅ **Live proof:** Ableton → IAC Driver → SameBoy → mGB works.
+- ✅ **Input-only integration point:** commit `39ae967` is the last commit before output
+  experimentation.
+- 🧪 **Exploratory only:** commits `4d64eba` and `61bdef9`, plus current uncommitted
+  `Cocoa/Document.m` changes, prototype Game Boy → MIDI output. Standard LSDJ clock output
+  successfully locked Ableton at the correct BPM after CoreMIDI timestamp reconstruction.
+  This proves feasibility but is not automatically part of the first PR.
+- ⏸️ **Decision pending:** open an upstream issue and ask whether the maintainer prefers:
+  (a) the contained mGB MIDI-input feature, or (b) an explicitly modeful
+  Arduinoboy-compatible accessory developed incrementally.
+
+Do **not** continue adding LSDJ/nanoloop protocol modes or musical note extraction until that
+scope discussion happens. Standard LSDJ 9.4.2 does not output its track notes as MIDI.
 
 ---
 
@@ -101,6 +110,7 @@ MIDI work** — we deliberately are not fixing it. (It's compiled out in release
 
 ## Upstreaming notes
 
+Before opening a PR, first open the proposal issue drafted in `MIDI_INPUT_FEATURE.md` §1.1.
 If this is eventually PR'd to `LIJI32/SameBoy`: keep the core device frontend‑agnostic (no
 CoreMIDI in `Core/`); follow `CONTRIBUTING.md` C style (it's strict — read it).
 
