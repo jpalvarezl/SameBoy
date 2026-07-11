@@ -130,6 +130,7 @@
     /* MIDI input (CoreMIDI). Per-Document: this is our end of the emulated serial cable. */
     MIDIClientRef _midiClient;
     MIDIPortRef _midiInputPort;
+    NSString *_midiInputSourceName;
 }
 
 static void boot_rom_load(GB_gameboy_t *gb, GB_boot_rom_t type)
@@ -1478,12 +1479,11 @@ static bool is_path_writeable(const char *path)
     else if ([anItem action] == @selector(selectMIDISource:)) {
         bool isMIDI = GB_get_built_in_accessory(&_gb) == GB_ACCESSORY_MIDI;
         NSString *itemSource = [(NSMenuItem *)anItem representedObject];
-        NSString *selected = [[NSUserDefaults standardUserDefaults] stringForKey:@"GBMIDIInputSource"];
         if (itemSource == nil) {
             [(NSMenuItem *)anItem setState:!isMIDI];   // the "None" row
         }
         else {
-            [(NSMenuItem *)anItem setState:(isMIDI && [itemSource isEqualToString:selected])];
+            [(NSMenuItem *)anItem setState:(isMIDI && [itemSource isEqualToString:_midiInputSourceName])];
         }
     }
     else if ([anItem action] == @selector(connectLinkCable:)) {
@@ -2551,6 +2551,7 @@ enum GBWindowResizeAction
 {
     [self disconnectLinkCable];
     [self teardownMIDIInput];
+    _midiInputSourceName = nil;
     [self performAtomicBlock:^{
         GB_disconnect_serial(&_gb);
     }];
@@ -2560,6 +2561,7 @@ enum GBWindowResizeAction
 {
     [self disconnectLinkCable];
     [self teardownMIDIInput];
+    _midiInputSourceName = nil;
     [self performAtomicBlock:^{
         GB_connect_printer(&_gb, printImage, printDone);
     }];
@@ -2569,6 +2571,7 @@ enum GBWindowResizeAction
 {
     [self disconnectLinkCable];
     [self teardownMIDIInput];
+    _midiInputSourceName = nil;
     [self performAtomicBlock:^{
         GB_connect_workboy(&_gb, setWorkboyTime, getWorkboyTime);
     }];
@@ -2577,9 +2580,9 @@ enum GBWindowResizeAction
 - (IBAction)selectMIDISource:(NSMenuItem *)sender
 {
     NSString *name = sender.representedObject; // nil == the "None" row
-    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    [self teardownMIDIInput]; // stop the previous source before resetting the core queue
+    _midiInputSourceName = name;
     if (name) {
-        [defaults setObject:name forKey:@"GBMIDIInputSource"];
         [self disconnectLinkCable];
         [self performAtomicBlock:^{
             GB_connect_midi(&_gb);
@@ -2587,8 +2590,6 @@ enum GBWindowResizeAction
         [self setupMIDIInput];
     }
     else {
-        [defaults removeObjectForKey:@"GBMIDIInputSource"];
-        [self teardownMIDIInput];
         [self performAtomicBlock:^{
             GB_disconnect_serial(&_gb);
         }];
@@ -2614,12 +2615,12 @@ enum GBWindowResizeAction
         if (!name) continue;
         NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:name
                                                       action:@selector(selectMIDISource:) keyEquivalent:@""];
-        item.representedObject = name; // the choice we persist and match against
+        item.representedObject = name; // the per-document choice we match against
         [menu addItem:item];
     }
 }
 
-// The stable, human-readable name of a CoreMIDI endpoint (used for display and persistence).
+// The stable, human-readable name of a CoreMIDI endpoint (used for display and routing).
 - (NSString *)nameOfMIDIEndpoint:(MIDIEndpointRef)endpoint
 {
     if (!endpoint) return nil;
@@ -2636,7 +2637,7 @@ enum GBWindowResizeAction
 {
     [self teardownMIDIInput]; // idempotent: always start from a clean slate
 
-    NSString *wanted = [[NSUserDefaults standardUserDefaults] stringForKey:@"GBMIDIInputSource"];
+    NSString *wanted = _midiInputSourceName;
     if (!wanted) return; // no source chosen -> nothing to open
 
 #pragma clang diagnostic push
